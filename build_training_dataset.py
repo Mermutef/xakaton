@@ -1,4 +1,4 @@
-# build_training_dataset.py (финальная версия без ошибок)
+# build_training_dataset.py – регрессия на снижение долга
 import pandas as pd
 import numpy as np
 import warnings
@@ -12,10 +12,9 @@ REFERENCE_DATE = pd.Timestamp('2026-03-01')
 
 
 # ------------------------------------------------------------
-# 1. Макроэкономические показатели
+# 1. Макроэкономические показатели (без изменений)
 # ------------------------------------------------------------
 def get_key_rate_by_month():
-    """Возвращает словарь {pd.Timestamp('YYYY-MM-01'): ставка}"""
     df = pd.read_csv(
         'data/IR_CHG_MPOFull_таб_дни изменений_полная версия.csv',
         encoding='utf-8-sig', sep=',', dtype=str, skiprows=2
@@ -25,15 +24,11 @@ def get_key_rate_by_month():
     df['Дата'] = pd.to_datetime(df['Дата'].str.strip(), errors='coerce')
     df['Ключевая ставка'] = pd.to_numeric(df['Ключевая ставка'].str.replace(',', '.'), errors='coerce')
     df = df[df['Дата'] >= pd.Timestamp('2020-01-01')].sort_values('Дата')
-
     months = pd.date_range('2020-01-01', '2026-05-01', freq='MS')
     rates = {}
     for m in months:
         prev = df[df['Дата'] <= m]
-        if not prev.empty:
-            rates[m] = prev.iloc[-1]['Ключевая ставка']
-        else:
-            rates[m] = None
+        rates[m] = prev.iloc[-1]['Ключевая ставка'] if not prev.empty else None
     return rates
 
 
@@ -66,10 +61,9 @@ def get_inflation_by_month():
 
 
 # ------------------------------------------------------------
-# 2. Вычисление динамических признаков на конкретный месяц
+# 2. Признаки на любой месяц (оставлены без изменений)
 # ------------------------------------------------------------
 def compute_turnover_features_at_month(turnover_df, target_month):
-    """Признаки из оборотки на начало target_month (данные строго до него)."""
     import re
     date_pat = re.compile(r'^(\d{4}-\d{2}-\d{2})')
     month_types = {}
@@ -90,14 +84,13 @@ def compute_turnover_features_at_month(turnover_df, target_month):
         return pd.DataFrame({
             'ЛС': turnover_df['ЛС'], 'debt_current': 0.0, 'months_debt': 0,
             'payment_ratio_6m': 0.0, 'max_debt_12m': 0.0,
-            'avg_accrual_6m': 0.0, 'trend_slope': 0.0, 'debt_std': 0.0
+            'avg_accrual_6m': 0.0, 'trend_slope': 0.0, 'debt_std': 0.0,
+            'debt_to_accrual_ratio': 0.0
         })
 
     last_month = past_months[-1]
-    if 'СЗ на начало' in month_types[last_month]:
-        debt_current = turnover_df[month_types[last_month]['СЗ на начало']]
-    else:
-        debt_current = 0.0
+    debt_current = turnover_df[month_types[last_month]['СЗ на начало']] if 'СЗ на начало' in month_types[
+        last_month] else 0.0
 
     def consecutive_debt(row):
         cnt = 0
@@ -125,10 +118,7 @@ def compute_turnover_features_at_month(turnover_df, target_month):
     debt_cols_12 = [month_types[m]['СЗ на начало'] for m in past_months
                     if m >= (target_month - pd.DateOffset(months=12)).strftime('%Y-%m-%d')
                     and 'СЗ на начало' in month_types[m]]
-    if debt_cols_12:
-        max_debt_12m = turnover_df[debt_cols_12].max(axis=1)
-    else:
-        max_debt_12m = debt_current
+    max_debt_12m = turnover_df[debt_cols_12].max(axis=1) if debt_cols_12 else debt_current
 
     nach_cols = [month_types[m]['Начислено'] for m in recent_months if 'Начислено' in month_types[m]]
     avg_accrual_6m = turnover_df[nach_cols].mean(axis=1) if nach_cols else 0.0
@@ -146,8 +136,10 @@ def compute_turnover_features_at_month(turnover_df, target_month):
         trend_slope = turnover_df.apply(slope, axis=1)
     else:
         trend_slope = 0.0
-
     debt_std = turnover_df[sz_cols].std(axis=1) if sz_cols else 0.0
+
+    # Новый признак
+    debt_to_accrual_ratio = debt_current / (avg_accrual_6m + 1)
 
     features = pd.DataFrame({
         'ЛС': turnover_df['ЛС'],
@@ -157,13 +149,13 @@ def compute_turnover_features_at_month(turnover_df, target_month):
         'max_debt_12m': max_debt_12m,
         'avg_accrual_6m': avg_accrual_6m,
         'trend_slope': trend_slope,
-        'debt_std': debt_std
+        'debt_std': debt_std,
+        'debt_to_accrual_ratio': debt_to_accrual_ratio
     })
     return features
 
 
 def compute_payment_features_at_month(payments_df, target_month):
-    """Признаки из оплат до начала target_month."""
     recent = payments_df[payments_df['Дата оплаты'] < target_month]
     if recent.empty:
         return pd.DataFrame({'ЛС': payments_df['ЛС'].unique(), 'total_paid_6m': 0.0,
@@ -182,7 +174,6 @@ def compute_payment_features_at_month(payments_df, target_month):
 
 
 def compute_measure_history_at_month(measure_dfs, target_month):
-    """Признаки по истории мер строго до начала target_month."""
     feats = pd.DataFrame({'ЛС': pd.concat([df['ЛС'] for df in measure_dfs.values()]).unique()})
     for name, mdf in measure_dfs.items():
         hist = mdf[mdf['Дата'] < target_month]
@@ -243,7 +234,7 @@ def compute_features_at_month(target_month, all_data, static_feats, clusters_df,
 
 
 # ------------------------------------------------------------
-# 3. Формирование обучающей выборки с таргетом
+# 3. Формирование обучающей выборки с таргетом debt_reduction
 # ------------------------------------------------------------
 def build_training_data():
     print("Загрузка сырых данных...")
@@ -261,7 +252,7 @@ def build_training_data():
         feats = compute_features_at_month(cur_month, all_data, static_feats, clusters_df, key_rates, infl_rates)
         next_month = cur_month + pd.DateOffset(months=1)
 
-        # Меры в текущем месяце (как и раньше)
+        # Меры, применённые в текущем месяце
         measures_in_month = {}
         for mname, mdf in {
             'autodial': all_data['measure_autodial'],
@@ -284,16 +275,19 @@ def build_training_data():
         if not all_ls:
             continue
 
-        # ---------- НОВОЕ: определение успеха по факту оплаты ----------
-        payments_df = all_data['payments']
-        # Оплаты в следующем календарном месяце
-        payments_next = payments_df[
-            (payments_df['Дата оплаты'] >= next_month) &
-            (payments_df['Дата оплаты'] < next_month + pd.DateOffset(months=1))
-            ]
-        paid_ls = set(payments_next['ЛС'].unique())
+        # Вычисляем снижение долга за следующий месяц для всех ЛС
+        debt_cur = compute_turnover_features_at_month(all_data['turnover'], cur_month)[['ЛС', 'debt_current']].rename(
+            columns={'debt_current': 'debt_start'})
+        debt_next = compute_turnover_features_at_month(all_data['turnover'], next_month)[['ЛС', 'debt_current']].rename(
+            columns={'debt_current': 'debt_end'})
+        debt_change = debt_cur.merge(debt_next, on='ЛС', how='left')
+        debt_change['debt_reduction'] = debt_change['debt_start'] - debt_change['debt_end']
+        debt_change['debt_start'] = debt_change['debt_start'].fillna(0)
+        debt_change['debt_end'] = debt_change['debt_end'].fillna(debt_change['debt_start'])
+        debt_change = debt_change.drop_duplicates(subset='ЛС')
+        debt_dict = dict(zip(debt_change['ЛС'], debt_change['debt_reduction']))
 
-        # Для ускорения строим словари
+        # Словарь признаков для быстрого доступа
         feats_dict = {}
         for _, r in feats.iterrows():
             feats_dict[r['ЛС']] = r.to_dict()
@@ -302,20 +296,17 @@ def build_training_data():
             row = feats_dict.get(ls)
             if row is None:
                 continue
-            # Цель: 1 – была оплата в следующем месяце, иначе 0
-            target = 1 if ls in paid_ls else 0
+            target = debt_dict.get(ls, 0.0)
             for mname, ls_list in measures_in_month.items():
                 if ls in ls_list:
                     sample = row.copy()
                     sample['action'] = mname
                     sample['target'] = target
                     all_samples.append(sample)
-        # ----------------------------------------------------------------
 
     train_df = pd.DataFrame(all_samples)
-    # Проверим баланс
-    print("Распределение целевой переменной:")
-    print(train_df['target'].value_counts())
+    print("Распределение целевой переменной (снижение долга):")
+    print(train_df['target'].describe())
     train_df.to_csv('data/training_data.csv', index=False)
     print(f"Обучающая выборка сохранена: {train_df.shape}")
     return train_df

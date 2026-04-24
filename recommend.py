@@ -1,4 +1,4 @@
-# recommend.py – финальная версия с жадным алгоритмом
+# recommend.py – регрессия + жадный алгоритм
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -71,7 +71,7 @@ def compute_features_current():
 current_features = compute_features_current()
 
 
-# 3. Допустимые меры
+# 3. Допустимые меры (без изменений)
 def determine_allowed_actions(df):
     allowed = []
     for _, row in df.iterrows():
@@ -105,13 +105,13 @@ def determine_allowed_actions(df):
 
 current_features['allowed_actions'] = determine_allowed_actions(current_features)
 
-# 4. Предсказание вероятностей (безопасный сбор)
+# 4. Предсказание ожидаемого возврата (регрессия)
 action_classes = list(action_encoder.classes_)
 action_to_idx = {a: i for i, a in enumerate(action_classes)}
 
-print("Предсказание вероятностей...")
+print("Предсказание ожидаемого снижения долга...")
 records = current_features.to_dict(orient='records')
-ls_list, action_list, prob_list, debt_list = [], [], [], []
+ls_list, action_list, pred_list, debt_list = [], [], [], []
 
 for rec in records:
     ls_val = rec['ЛС']
@@ -125,28 +125,24 @@ for rec in records:
         code = action_to_idx[act]
         feat_dict['action_encoded'] = code
         X = pd.DataFrame([feat_dict])[feature_names]
-        prob = model.predict(X)[0]
+        pred = model.predict(X)[0]
+        # Ожидаемый возврат не может быть отрицательным
+        expected_return = max(0.0, pred)
         ls_list.append(ls_val)
         action_list.append(act)
-        prob_list.append(prob)
+        pred_list.append(expected_return)
         debt_list.append(rec['debt_current'])
 
 pred_df = pd.DataFrame({
     'ЛС': ls_list,
     'action': action_list,
-    'prob_success': prob_list,
+    'expected_return': pred_list,
     'debt_current': debt_list
 })
 
 print(f"Сгенерировано {len(pred_df)} рекомендаций")
-print(f"Распределение prob_success: min={pred_df['prob_success'].min():.4f}, "
-      f"mean={pred_df['prob_success'].mean():.4f}, max={pred_df['prob_success'].max():.4f}")
-print(f"Количество с prob > 0.5: {(pred_df['prob_success'] > 0.5).sum()}")
-
-# Отсеиваем совсем бесперспективные (опционально, порог можно менять)
-prob_threshold = 0.001
-pred_df = pred_df[pred_df['prob_success'] > prob_threshold].copy()
-print(f"После фильтра prob > {prob_threshold}: {len(pred_df)} записей")
+print(f"Распределение expected_return: min={pred_df['expected_return'].min():.2f}, "
+      f"mean={pred_df['expected_return'].mean():.2f}, max={pred_df['expected_return'].max():.2f}")
 
 # 5. Жадное назначение с учётом лимитов
 LIMITS = {
@@ -162,14 +158,9 @@ LIMITS = {
     'exec_doc': 250
 }
 
-# Вычисляем ожидаемую выгоду и сортируем для каждой меры
-pred_df['expected_return'] = pred_df['prob_success'] * pred_df['debt_current']
-
-# Порядок применения мер: сначала массовые с большим лимитом, потом дефицитные
 measure_order = ['email', 'autodial', 'notice_limit', 'sms', 'operator_call', 'claim', 'visit', 'court_order', 'limit',
                  'exec_doc']
-
-assigned = set()  # ЛС, которые уже получили какую-то меру
+assigned = set()
 assignments = []
 
 for measure in measure_order:
@@ -177,16 +168,16 @@ for measure in measure_order:
     if limit == 0:
         continue
     candidates = pred_df[pred_df['action'] == measure].copy()
-    # исключаем уже назначенных
     candidates = candidates[~candidates['ЛС'].isin(assigned)]
-    # сортируем по ожидаемой выгоде
     candidates = candidates.sort_values('expected_return', ascending=False)
-    # выбираем не более limit записей
     selected = candidates.head(limit)
     for _, row in selected.iterrows():
-        assignments.append({'ЛС': row['ЛС'], 'action': measure,
-                            'prob_success': row['prob_success'],
-                            'expected_return': row['expected_return']})
+        assignments.append({
+            'ЛС': row['ЛС'],
+            'action': measure,
+            'expected_return': row['expected_return'],
+            'debt_current': row['debt_current']
+        })
         assigned.add(row['ЛС'])
 
 result_df = pd.DataFrame(assignments)
@@ -199,10 +190,6 @@ result_df = result_df.merge(
     current_features[['ЛС', 'cluster', 'debt_current', 'months_debt']],
     on='ЛС', how='left'
 )
-# expected_return уже есть в result_df из цикла, но если нет – пересчитаем
-if 'expected_return' not in result_df.columns:
-    result_df = result_df.merge(pred_df[['ЛС', 'action', 'expected_return']], on=['ЛС', 'action'], how='left')
-
 result_df.to_csv('data/recommendations_march2026.csv', index=False)
 print("Рекомендации сохранены в data/recommendations_march2026.csv")
 
@@ -213,8 +200,9 @@ for m in measure_order:
     print(f"{m}: использовано {used}/{limit}")
 
 print("\nСредние характеристики назначенных должников:")
-print(result_df.groupby('action').agg(
-    avg_debt=('debt_current', 'mean'),
-    avg_months=('months_debt', 'mean'),
-    count=('ЛС', 'count')
-))
+if not result_df.empty:
+    print(result_df.groupby('action').agg(
+        avg_debt=('debt_current', 'mean'),
+        avg_months=('months_debt', 'mean'),
+        count=('ЛС', 'count')
+    ))
