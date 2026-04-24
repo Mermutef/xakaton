@@ -111,7 +111,8 @@ print(f"5-й процентиль ошибки: {np.percentile(errors, 5):.2f}")
 print(f"95-й процентиль ошибки: {np.percentile(errors, 95):.2f}")
 
 joblib.dump(final_lgb, 'models/uplift_model.pkl')
-joblib.dump(features, 'models/feature_names.pkl')
+feature_names = list(X.columns)
+joblib.dump(feature_names, 'models/feature_names.pkl')
 print("Модель LightGBM сохранена (models/uplift_model.pkl)")
 
 importance = final_lgb.feature_importance(importance_type='gain')
