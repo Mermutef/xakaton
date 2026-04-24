@@ -100,7 +100,7 @@ def convert_xlsx_to_csv(directory: str) -> None:
 
 
 def main():
-    convert_xlsx_to_csv("macro")
+    convert_xlsx_to_csv("data")
 
 
 if __name__ == "__main__":

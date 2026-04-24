@@ -1,4 +1,4 @@
-# recommend.py – регрессия + жадный алгоритм
+# recommend.py – финальная версия с жадным алгоритмом и улучшенной моделью
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -65,13 +65,18 @@ def compute_features_current():
     numeric_cols = ['ЛС'] + [c for c in num_cols if c != 'ЛС']
     master = master[numeric_cols]
     master = master.drop_duplicates(subset='ЛС', keep='first').reset_index(drop=True)
+    # Категориальные признаки – целые числа, как при обучении
+    if 'cluster' in master.columns:
+        master['cluster'] = master['cluster'].astype(int)
+    if 'stage' in master.columns:
+        master['stage'] = master['stage'].astype(int)
     return master
 
 
 current_features = compute_features_current()
 
 
-# 3. Допустимые меры (без изменений)
+# 3. Допустимые меры (критерии из Приложения №1)
 def determine_allowed_actions(df):
     allowed = []
     for _, row in df.iterrows():
@@ -125,8 +130,11 @@ for rec in records:
         code = action_to_idx[act]
         feat_dict['action_encoded'] = code
         X = pd.DataFrame([feat_dict])[feature_names]
+        for col in feature_names:
+            if col not in X.columns:
+                X[col] = 0
+        X = X[feature_names]
         pred = model.predict(X)[0]
-        # Ожидаемый возврат не может быть отрицательным
         expected_return = max(0.0, pred)
         ls_list.append(ls_val)
         action_list.append(act)
@@ -140,7 +148,7 @@ pred_df = pd.DataFrame({
     'debt_current': debt_list
 })
 
-print(f"Сгенерировано {len(pred_df)} рекомендаций")
+print(f"Сгенерировано {len(pred_df)} потенциальных рекомендаций")
 print(f"Распределение expected_return: min={pred_df['expected_return'].min():.2f}, "
       f"mean={pred_df['expected_return'].mean():.2f}, max={pred_df['expected_return'].max():.2f}")
 
@@ -190,6 +198,7 @@ result_df = result_df.merge(
     current_features[['ЛС', 'cluster', 'debt_current', 'months_debt']],
     on='ЛС', how='left'
 )
+
 result_df.to_csv('data/recommendations_march2026.csv', index=False)
 print("Рекомендации сохранены в data/recommendations_march2026.csv")
 
