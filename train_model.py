@@ -1,4 +1,3 @@
-# train_model.py – регрессия на снижение долга (финальная версия)
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -10,11 +9,9 @@ from sklearn.preprocessing import LabelEncoder
 
 warnings.filterwarnings('ignore')
 
-# ---------- Загрузка данных ----------
 df = pd.read_csv('data/training_data.csv')
 print(f"Датасет до обработки выбросов: {df.shape}")
 
-# Убираем экстремальные значения целевой переменной (1-й и 99-й процентили)
 lower = df['target'].quantile(0.01)
 upper = df['target'].quantile(0.99)
 df = df[(df['target'] >= lower) & (df['target'] <= upper)]
@@ -33,7 +30,6 @@ X['cluster'] = X['cluster'].astype(int)
 X['stage'] = X['stage'].astype(int)
 joblib.dump(le, 'models/action_encoder.pkl')
 
-# ---------- Параметры LightGBM (лучшие по итогам тюнинга) ----------
 lgb_params = {
     'boosting_type': 'gbdt',
     'objective': 'regression',
@@ -52,7 +48,6 @@ lgb_params = {
     'n_jobs': -1,
 }
 
-# ---------- Кросс-валидация ----------
 tscv = TimeSeriesSplit(n_splits=5)
 rmse_scores, mae_scores, r2_scores, ev_scores = [], [], [], []
 
@@ -90,8 +85,6 @@ print(f"MAE  : {np.mean(mae_scores):.2f} (±{np.std(mae_scores):.2f})")
 print(f"R²   : {np.mean(r2_scores):.4f} (±{np.std(r2_scores):.4f})")
 print(f"EV   : {np.mean(ev_scores):.4f} (±{np.std(ev_scores):.4f})")
 
-# ---------- Финальная модель с подбором числа итераций ----------
-# Разделим данные на обучающую и валидационную выборки для early stopping
 X_train_full, X_valid, y_train_full, y_valid = train_test_split(
     X, y, test_size=0.2, shuffle=False  # сохраняем временной порядок
 )
@@ -108,7 +101,6 @@ final_lgb = lgb.train(
 )
 print(f"Оптимальное число итераций: {final_lgb.best_iteration}")
 
-# ---------- Анализ ошибок на всей выборке ----------
 print("\n=== Анализ ошибок финальной модели ===")
 y_pred_full = final_lgb.predict(X)
 errors = y_pred_full - y
@@ -118,19 +110,16 @@ print(f"Стандартное отклонение ошибки: {errors.std():
 print(f"5-й процентиль ошибки: {np.percentile(errors, 5):.2f}")
 print(f"95-й процентиль ошибки: {np.percentile(errors, 95):.2f}")
 
-# Сохраняем модель
 joblib.dump(final_lgb, 'models/uplift_model.pkl')
 joblib.dump(features, 'models/feature_names.pkl')
 print("Модель LightGBM сохранена (models/uplift_model.pkl)")
 
-# Важность признаков
 importance = final_lgb.feature_importance(importance_type='gain')
 feat_imp = pd.DataFrame({'feature': X.columns, 'importance': importance})
 feat_imp = feat_imp.sort_values('importance', ascending=False).head(30)
 print("\nTop-30 важных признаков:")
 print(feat_imp)
 
-# SHAP анализ
 import shap
 
 explainer = shap.TreeExplainer(final_lgb)
@@ -139,3 +128,14 @@ shap_values = explainer.shap_values(X.iloc[sample_idx])
 joblib.dump(shap_values, 'models/shap_values_sample.pkl')
 joblib.dump(X.iloc[sample_idx], 'models/shap_X_sample.pkl')
 print("SHAP значения сохранены")
+
+import json
+
+metrics = {
+    'R2': round(np.mean(r2_scores), 4),
+    'RMSE': round(np.mean(rmse_scores), 2),
+    'MAE': round(np.mean(mae_scores), 2),
+}
+with open('models/training_metrics.json', 'w') as f:
+    json.dump(metrics, f)
+print("Метрики сохранены в models/training_metrics.json")

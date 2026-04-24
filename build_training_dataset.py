@@ -1,7 +1,11 @@
-# build_training_dataset.py – регрессия на снижение долга
+from pathlib import Path
+
 import pandas as pd
 import numpy as np
 import warnings
+import subprocess
+import sys
+from feature_engineering import build_master_table
 
 warnings.filterwarnings('ignore')
 
@@ -9,55 +13,6 @@ from data_loader import load_all_data
 from feature_engineering import build_static_features
 
 REFERENCE_DATE = pd.Timestamp('2026-03-01')
-
-
-# ------------------------------------------------------------
-# 1. Макроэкономические показатели (без изменений)
-# ------------------------------------------------------------
-def get_key_rate_by_month():
-    df = pd.read_csv(
-        'data/IR_CHG_MPOFull_таб_дни изменений_полная версия.csv',
-        encoding='utf-8-sig', sep=',', dtype=str, skiprows=2
-    )
-    df.columns = ['Дата', 'Ключевая ставка'] + [f'col{i}' for i in range(2, len(df.columns))]
-    df = df[['Дата', 'Ключевая ставка']].dropna()
-    df['Дата'] = pd.to_datetime(df['Дата'].str.strip(), errors='coerce')
-    df['Ключевая ставка'] = pd.to_numeric(df['Ключевая ставка'].str.replace(',', '.'), errors='coerce')
-    df = df[df['Дата'] >= pd.Timestamp('2020-01-01')].sort_values('Дата')
-    months = pd.date_range('2020-01-01', '2026-05-01', freq='MS')
-    rates = {}
-    for m in months:
-        prev = df[df['Дата'] <= m]
-        rates[m] = prev.iloc[-1]['Ключевая ставка'] if not prev.empty else None
-    return rates
-
-
-def get_inflation_by_month():
-    """Возвращает словарь {pd.Timestamp('YYYY-MM-01'): инфляция % г/г}"""
-    infl = pd.read_csv(
-        'data/Инфляция и ключевая ставка Банка России_F25_10_2025_T23_04_2026_Инфляция и ключевая ставка Банк.csv',
-        encoding='utf-8-sig', sep=',', dtype=str
-    )
-    infl.columns = infl.columns.str.replace('"', '').str.strip()
-    dates = infl.iloc[:, 0]
-    values = infl.iloc[:, 2]
-    inflation_dict = {}
-    for d, v in zip(dates, values):
-        if pd.isna(d):
-            continue
-        parts = str(d).strip().split('.')
-        if len(parts) == 2:
-            month, year = int(parts[0]), int(parts[1])
-            if 1 <= month <= 12:
-                date_key = pd.Timestamp(year=year, month=month, day=1)
-                inflation_dict[date_key] = float(str(v).replace(',', '.'))
-    all_months = pd.date_range('2020-01-01', '2026-05-01', freq='MS')
-    full_infl = {}
-    for m in all_months:
-        full_infl[m] = inflation_dict.get(m, np.nan)
-    infl_series = pd.Series(full_infl)
-    infl_series = infl_series.fillna(infl_series.mean())
-    return infl_series.to_dict()
 
 
 # ------------------------------------------------------------
@@ -199,7 +154,7 @@ def compute_measure_history_at_month(measure_dfs, target_month):
     return feats
 
 
-def compute_features_at_month(target_month, all_data, static_feats, clusters_df, key_rate_dict, infl_dict):
+def compute_features_at_month(target_month, all_data, static_feats, clusters_df):
     turnover_feat = compute_turnover_features_at_month(all_data['turnover'], target_month)
     payment_feat = compute_payment_features_at_month(all_data['payments'], target_month)
     measure_dfs = {
@@ -223,8 +178,8 @@ def compute_features_at_month(target_month, all_data, static_feats, clusters_df,
     master = master.merge(measure_feat, on='ЛС', how='left')
     master = master.merge(cluster_col, on='ЛС', how='left')
     master = master.fillna(0)
-    master['key_rate'] = key_rate_dict.get(target_month, np.nan)
-    master['inflation'] = infl_dict.get(target_month, np.nan)
+    # master['key_rate'] = key_rate_dict.get(target_month, np.nan)
+    # master['inflation'] = infl_dict.get(target_month, np.nan)
     master = master.loc[:, ~master.columns.duplicated()]
     num_cols = master.select_dtypes(include=[np.number]).columns.tolist()
     numeric_cols = ['ЛС'] + [c for c in num_cols if c != 'ЛС']
@@ -240,16 +195,23 @@ def build_training_data():
     print("Загрузка сырых данных...")
     all_data = load_all_data()
     static_feats = build_static_features(all_data['general'])
-    clusters_df = pd.read_csv('data/clusters.csv')
-    key_rates = get_key_rate_by_month()
-    infl_rates = get_inflation_by_month()
+    clusters_path = 'data/clusters.csv'
+    if not Path(clusters_path).exists():
+        print("Кластеры не найдены. Запускаем кластеризацию...")
+        # Сначала строим master_features.csv
+        master_df = build_master_table()
+        master_df.to_csv('data/master_features.csv', index=False)
+        # Затем запускаем clustering.py
+        subprocess.run([sys.executable, 'clustering.py'], check=True)
+
+    clusters_df = pd.read_csv(clusters_path)
 
     months = pd.date_range('2025-02-01', '2026-01-01', freq='MS')
     all_samples = []
 
     for cur_month in months:
         print(f"Обработка месяца {cur_month.strftime('%Y-%m')}")
-        feats = compute_features_at_month(cur_month, all_data, static_feats, clusters_df, key_rates, infl_rates)
+        feats = compute_features_at_month(cur_month, all_data, static_feats, clusters_df)
         next_month = cur_month + pd.DateOffset(months=1)
 
         # Меры, применённые в текущем месяце
